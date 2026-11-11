@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "project-cockpit",
+  "description": "Project Cockpit for Claude Code.",
+  "owner": {
+    "name": "Jeremy Tran",
+    "url": "https://github.com/Tranman324"
+  },
+  "plugins": [
+    {
+      "name": "project-cockpit",
+      "source": "./project-cockpit",
+      "description": "A capped STATUS/ROADMAP/REFERENCE doc set that lets any fresh session resume a long-running project from one short file."
+    }
+  ]
+}

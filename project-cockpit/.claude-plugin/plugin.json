@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "project-cockpit",
+  "displayName": "Project Cockpit",
+  "version": "1.0.0",
+  "description": "A capped STATUS/ROADMAP/REFERENCE doc set that lets any fresh Claude Code session resume a long-running project from one short file.",
+  "author": {
+    "name": "Jeremy Tran",
+    "url": "https://github.com/Tranman324"
+  },
+  "homepage": "https://github.com/Tranman324/project-cockpit",
+  "repository": "https://github.com/Tranman324/project-cockpit",
+  "license": "MIT",
+  "keywords": ["context", "memory", "handoff", "project-docs", "compaction"],
+  "skills": ["./"]
+}

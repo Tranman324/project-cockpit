@@ -1,0 +1,17 @@
+{
+  "description": "Load docs/STATUS.md into context at startup, resume, /clear, and after compaction.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cockpit.py\" brief",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
