@@ -1,7 +1,7 @@
 ---
 name: project-cockpit
 description: "Use when starting, resuming, or wrapping up work on a long-running project. Keeps a capped STATUS/ROADMAP/REFERENCE doc set so a fresh session resumes cold from one short file."
-version: 1.0.0
+version: 1.1.0
 author: Jeremy Tran
 license: MIT
 ---
@@ -37,6 +37,8 @@ Sessions end abruptly, so record state the moment it changes, not "at the end."
 - A lasting choice: one dated line in REFERENCE.md Decisions, with the reason. To change a decision, append a new line naming the date it supersedes; the old line stays.
 - A hypothesis proven wrong: one line in Ruled Out, with the proof. A ruled-out item is closed; reopen it only with new evidence.
 - **No evidence, no claim.** Done, fixed, and verified each cite a commit, a test run, or `file:line`.
+
+Two hooks back this up. When a turn ends with code newer than STATUS.md, the Stop hook sends one `project-cockpit:` note. Update STATUS.md if state changed; if it did not, say so in one line. Before compaction, the PreCompact hook tells the summary to keep anything STATUS.md has not recorded yet. When a summary ends "First action: bring STATUS.md up to date", do that first.
 
 ## Wrap up
 

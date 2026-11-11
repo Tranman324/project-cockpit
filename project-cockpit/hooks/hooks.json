@@ -1,5 +1,5 @@
 {
-  "description": "Load docs/STATUS.md into context at startup, resume, /clear, and after compaction.",
+  "description": "Load docs/STATUS.md at session start and after compaction, keep unrecorded state through compaction, and nudge once when code moves but STATUS.md does not.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,6 +8,28 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cockpit.py\" brief",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cockpit.py\" precompact",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cockpit.py\" guard",
             "timeout": 20
           }
         ]

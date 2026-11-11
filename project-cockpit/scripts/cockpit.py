@@ -2,10 +2,12 @@
 """project-cockpit: keep a small, capped doc set that lets any fresh agent session resume cold.
 
 Commands
-  init      create the doc set from templates (never overwrites)
-  check     validate caps, sections, dates, archive immutability, hidden characters
-  brief     print STATUS.md plus drift notes; built for a SessionStart hook (always exits 0)
-  closeout  start an archive/YYYY-MM-<slug>.md milestone closeout
+  init        create the doc set from templates (never overwrites)
+  check       validate caps, sections, dates, archive immutability, hidden characters
+  brief       print STATUS.md plus drift notes; built for a SessionStart hook (always exits 0)
+  closeout    start an archive/YYYY-MM-<slug>.md milestone closeout
+  guard       Stop hook: nudge the agent once when code moved but STATUS.md did not
+  precompact  PreCompact hook: tell the compaction summary to keep unrecorded state
 
 The doc root defaults to <project>/docs, where <project> is $CLAUDE_PROJECT_DIR or the
 current directory. Override with --root or $COCKPIT_ROOT. Standard library only.
@@ -19,9 +21,11 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 DESCRIPTION = "Keep a small, capped doc set that lets any fresh agent session resume cold."
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
 
@@ -31,6 +35,8 @@ CLOSEOUT_SECTIONS = ("Shipped", "Evidence", "Decisions", "Changed From Plan", "F
 MAX_TODOS = 7
 MAX_MILESTONES = 3
 STALE_DAYS = 14
+GUARD_MINUTES = 20  # minimum gap between two nudges in one session
+KEEP_CURRENT = "Keep it current: update STATUS.md in the same turn a fix lands, a blocker clears, or a decision is made."
 TIERS = {
     "lite": ("STATUS.md",),
     "ops": ("STATUS.md", "REFERENCE.md"),
@@ -315,7 +321,7 @@ def cmd_brief(args: argparse.Namespace) -> int:
             shown = status
         print(f"Project cockpit ({shown.as_posix()}). Read this before anything else:\n")
         print(text)
-        notes = []
+        notes = [KEEP_CURRENT]
         commits, dirty = drift(root)
         if commits:
             notes.append(f"{commits} commit(s) landed after STATUS.md was last committed. Check `git log` before repeating its claims.")
@@ -332,10 +338,9 @@ def cmd_brief(args: argparse.Namespace) -> int:
         extra = [n for n in ("ROADMAP.md", "REFERENCE.md") if (root / n).is_file()]
         if extra:
             notes.append(" and ".join(extra) + " are in the same folder. Read them only when the task needs them.")
-        if notes:
-            print("\nCockpit notes:")
-            for n in notes:
-                print(f"- {n}")
+        print("\nCockpit notes:")
+        for n in notes:
+            print(f"- {n}")
     except Exception as exc:  # a hook must never break session start
         print(f"(project-cockpit brief skipped: {exc})", file=sys.stderr)
     return 0
@@ -359,6 +364,127 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     dest.write_text(render("CLOSEOUT.md", TITLE=title, DATE=today().isoformat()), encoding="utf-8")
     print(f"created  {dest}")
     print("next: fill it in, remove the milestone from ROADMAP.md, promote Next to Current")
+    return 0
+
+
+# ---------------------------------------------------------------- hooks: guard and precompact
+
+def read_hook_input() -> dict | None:
+    """The hook's JSON event from stdin; {} when there is none, None when it is unreadable."""
+    try:
+        data = json.loads(sys.stdin.read() or "{}") if not sys.stdin.isatty() else {}
+    except (ValueError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def newest_change(root: Path) -> tuple[float, str] | None:
+    """Newest code change outside the doc root: (epoch seconds, path). None outside git."""
+    top_raw = (git(root, "rev-parse", "--show-toplevel") or "").strip()
+    if not top_raw:
+        return None
+    top = Path(top_raw).resolve()
+    best: tuple[float, str] = (0.0, "")
+    tokens = (git(top, "status", "--porcelain", "-z") or "").split("\0")
+    skip = False
+    for tok in tokens:
+        if skip:
+            skip = False
+            continue
+        if len(tok) < 4:
+            continue
+        if tok[0] in "RC":
+            skip = True  # -z puts the rename source in the next token
+        path = (top / tok[3:]).resolve()
+        if path == root or root in path.parents:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue  # deleted: nothing to date it by
+        if mtime > best[0]:
+            best = (mtime, tok[3:])
+    spec = ["--", "."]
+    if top in root.parents:
+        spec.append(f":(exclude){root.relative_to(top).as_posix()}")
+    line = (git(top, "log", "-1", "--format=%ct %h", *spec) or "").split()
+    if len(line) == 2 and line[0].isdigit() and float(line[0]) > best[0]:
+        best = (float(line[0]), f"commit {line[1]}")
+    return best if best[0] else None
+
+
+def status_time(root: Path) -> float:
+    """When STATUS.md was last written: the later of its mtime and its last commit."""
+    status = root / "STATUS.md"
+    stamp = status.stat().st_mtime
+    committed = (git(root, "log", "-1", "--format=%ct", "--", str(status)) or "").strip()
+    return max(stamp, float(committed)) if committed.isdigit() else stamp
+
+
+def guard_state() -> Path:
+    base = os.environ.get("CLAUDE_PLUGIN_DATA") or tempfile.gettempdir()
+    return Path(base) / "project-cockpit-guard.json"
+
+
+def cmd_guard(args: argparse.Namespace) -> int:
+    """Stop hook. Exit 0 always; print a Stop additionalContext nudge or nothing."""
+    try:
+        if os.environ.get("COCKPIT_GUARD", "").lower() in ("0", "off", "false", "no"):
+            return 0
+        event = read_hook_input()
+        if event is None or event.get("stop_hook_active"):
+            return 0  # unreadable input, or already continuing because of a stop hook: never loop
+        root = resolve_root(args.root)
+        if not (root / "STATUS.md").is_file():
+            return 0
+        change = newest_change(root)
+        if not change or change[0] <= status_time(root) + 1:
+            return 0
+        state_path = guard_state()
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state = state if isinstance(state, dict) else {}
+        except (OSError, ValueError):
+            state = {}
+        key = f"{event.get('session_id') or 'default'}:{root}"
+        now = time.time()
+        last = state.get(key, 0)
+        minutes = float(os.environ.get("COCKPIT_GUARD_MINUTES") or GUARD_MINUTES)
+        if not isinstance(last, (int, float)) or change[0] <= last or now - last < minutes * 60:
+            return 0  # nothing new since the last nudge, or nudged recently
+        state = {k: v for k, v in state.items() if isinstance(v, (int, float)) and now - v < 86400}
+        state[key] = now
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+        except OSError:
+            return 0  # cannot remember the nudge, so stay quiet rather than repeat it
+        try:
+            shown = (root / "STATUS.md").relative_to(project_dir()).as_posix()
+        except ValueError:
+            shown = str(root / "STATUS.md")
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": (
+            f"project-cockpit: the project changed ({change[1]}) after {shown} was last written. "
+            "If this work changed project state (a fix landed, a blocker cleared, a decision was made, "
+            f"a TODO finished, or the next step moved), update {shown} now and keep it under "
+            f"{CAPS['STATUS.md']} lines. If it did not, reply with one line saying so and stop.")}}))
+    except Exception as exc:  # a hook must never break the session
+        print(f"(project-cockpit guard skipped: {exc})", file=sys.stderr)
+    return 0
+
+
+def cmd_precompact(args: argparse.Namespace) -> int:
+    """PreCompact hook. Stdout becomes instructions for the compaction summary."""
+    try:
+        root = resolve_root(args.root)
+        if (root / "STATUS.md").is_file():
+            print("This project keeps its state in docs/STATUS.md (project-cockpit). In the summary, keep "
+                  "verbatim every decision, fix, blocker, ruled-out hypothesis, and next step from this "
+                  "conversation that STATUS.md does not already record, with the evidence for each "
+                  "(commit, test run, or file:line). End the summary with: \"First action: bring "
+                  "STATUS.md up to date with the items above.\"")
+    except Exception as exc:
+        print(f"(project-cockpit precompact skipped: {exc})", file=sys.stderr)
     return 0
 
 
@@ -392,6 +518,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--title", help="human title (default: from slug)")
     s.add_argument("--month", help="YYYY-MM (default: this month)")
     s.set_defaults(func=cmd_closeout)
+
+    s = with_root(sub.add_parser("guard", help="Stop hook: nudge once when code moved but STATUS.md did not"))
+    s.set_defaults(func=cmd_guard)
+
+    s = with_root(sub.add_parser("precompact", help="PreCompact hook: keep unrecorded state in the summary"))
+    s.set_defaults(func=cmd_precompact)
 
     args = p.parse_args(argv)
     return args.func(args)

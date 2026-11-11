@@ -2,14 +2,14 @@
 
 ## Claude Code
 
-**Plugin install** (recommended): the plugin registers the SessionStart hook for you.
+**Plugin install** (recommended): the plugin registers all three hooks for you.
 
 ```
 /plugin marketplace add Tranman324/project-cockpit
 /plugin install project-cockpit@project-cockpit
 ```
 
-**Copy install:** put this folder at `~/.claude/skills/project-cockpit/` (all projects) or `<repo>/.claude/skills/project-cockpit/` (one project). Claude Code loads `SKILL.md` as a skill, and the bundled `.claude-plugin/plugin.json` makes it load `hooks/hooks.json` too. Start a new session, then confirm the hook with `claude plugin details project-cockpit@skills-dir` (look for `Hooks (1) SessionStart`). If it is missing, add the hook to `.claude/settings.json` by hand:
+**Copy install:** put this folder at `~/.claude/skills/project-cockpit/` (all projects) or `<repo>/.claude/skills/project-cockpit/` (one project). Claude Code loads `SKILL.md` as a skill, and the bundled `.claude-plugin/plugin.json` makes it load `hooks/hooks.json` too. Start a new session, then confirm the hook with `claude plugin details project-cockpit@skills-dir` (look for `Hooks (3) SessionStart, PreCompact, Stop`). If they are missing, add them to `.claude/settings.json` by hand:
 
 ```json
 {
@@ -17,16 +17,26 @@
     "SessionStart": [
       {
         "matcher": "startup|resume|clear|compact",
-        "hooks": [
-          { "type": "command", "command": "python3 \"$HOME/.claude/skills/project-cockpit/scripts/cockpit.py\" brief" }
-        ]
+        "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/skills/project-cockpit/scripts/cockpit.py\" brief" }]
       }
+    ],
+    "PreCompact": [
+      { "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/skills/project-cockpit/scripts/cockpit.py\" precompact" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/skills/project-cockpit/scripts/cockpit.py\" guard" }] }
     ]
   }
 }
 ```
 
-The hook fires on startup, `--resume`, `/clear`, and after compaction, so STATUS.md is back in context exactly when memory was lost. It prints nothing in a repo without `docs/STATUS.md`, and it always exits 0, so it is safe to install globally. On Windows, change `python3` to `python` if that is how Python is installed.
+What each hook does:
+
+- **SessionStart** (`brief`): on startup, `--resume`, `/clear`, and after compaction, prints STATUS.md into context, exactly when memory was lost.
+- **PreCompact** (`precompact`): tells the compaction summary to keep decisions, fixes, and blockers that STATUS.md has not recorded, and to end with "bring STATUS.md up to date."
+- **Stop** (`guard`): when a turn ends and a file outside `docs/` (or a commit) is newer than STATUS.md, sends Claude one note to update it or say nothing changed. It nudges once per change, at most every `COCKPIT_GUARD_MINUTES` (default 20) per session, and stays silent when `stop_hook_active` is set, so it cannot loop. `COCKPIT_GUARD=off` disables it. It needs git.
+
+All three print nothing in a project without `docs/STATUS.md` and always exit 0, so they are safe to install globally. On Windows, change `python3` to `python` if that is how Python is installed.
 
 **Pointer:** add these two lines to the project's `CLAUDE.md` so the skill fires even without the hook:
 

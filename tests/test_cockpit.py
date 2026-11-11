@@ -8,7 +8,9 @@ import os
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -83,10 +85,12 @@ class Base(unittest.TestCase):
         self.project = Path(self.tmp.name)
         self.docs = self.project / "docs"
         self.docs.mkdir()
-        self._env = {k: os.environ.get(k) for k in ("CLAUDE_PROJECT_DIR", "COCKPIT_ROOT", "COCKPIT_TODAY")}
+        self._env = {k: os.environ.get(k) for k in (
+            "CLAUDE_PROJECT_DIR", "COCKPIT_ROOT", "COCKPIT_TODAY", "GIT_CEILING_DIRECTORIES")}
         os.environ["CLAUDE_PROJECT_DIR"] = str(self.project)
         os.environ.pop("COCKPIT_ROOT", None)
         os.environ["COCKPIT_TODAY"] = TODAY
+        os.environ["GIT_CEILING_DIRECTORIES"] = str(self.project.parent)  # never see an enclosing repo
 
     def tearDown(self):
         for k, v in self._env.items():
@@ -369,6 +373,134 @@ class Brief(Base):
         res = self.brief()
         self.assertEqual(res.returncode, 0)
 
+    def test_always_reminds_to_keep_current(self):
+        self.write("STATUS.md", GOOD_STATUS)
+        self.assertIn(cockpit.KEEP_CURRENT, self.brief().stdout)
+
+
+class Guard(Base):
+    """The Stop hook: nudge once when the project moved but STATUS.md did not."""
+
+    def setUp(self):
+        super().setUp()
+        self._data = tempfile.TemporaryDirectory()  # outside the project, like ~/.claude/plugins/data
+        self.addCleanup(self._data.cleanup)
+        self.data = Path(self._data.name) / "plugin-data"
+        git(self.project, "init", "-q")
+
+    def guard(self, event=None, raw=None, **env) -> subprocess.CompletedProcess:
+        payload = raw if raw is not None else json.dumps({"session_id": "s1", "stop_hook_active": False, **(event or {})})
+        return subprocess.run([sys.executable, str(SCRIPT), "guard"], input=payload, capture_output=True, text=True,
+                              cwd=self.project, env={**os.environ, "CLAUDE_PLUGIN_DATA": str(self.data), **env})
+
+    def nudge(self, res: subprocess.CompletedProcess) -> str:
+        self.assertEqual(res.returncode, 0, res.stderr)
+        if not res.stdout.strip():
+            return ""
+        out = json.loads(res.stdout)
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "Stop")
+        return out["hookSpecificOutput"]["additionalContext"]
+
+    def old_status(self, age: int = 1000) -> Path:
+        p = self.write("STATUS.md", GOOD_STATUS)
+        past = time.time() - age
+        os.utime(p, (past, past))
+        return p
+
+    def test_silent_without_status(self):
+        (self.project / "app.py").write_text("x")
+        self.assertEqual(self.nudge(self.guard()), "")
+
+    def test_silent_outside_git(self):
+        shutil.rmtree(self.project / ".git")
+        self.old_status()
+        (self.project / "app.py").write_text("x")
+        self.assertEqual(self.nudge(self.guard()), "")
+
+    def test_nudges_once_for_dirty_code(self):
+        self.old_status()
+        (self.project / "app.py").write_text("x")
+        msg = self.nudge(self.guard())
+        self.assertIn("app.py", msg)
+        self.assertIn("docs/STATUS.md", msg)
+        self.assertEqual(self.nudge(self.guard()), "", "same change must not nudge twice")
+        self.assertEqual(self.nudge(self.guard(COCKPIT_GUARD_MINUTES="0")), "", "even with no cooldown")
+
+    def test_never_loops(self):
+        self.old_status()
+        (self.project / "app.py").write_text("x")
+        self.assertEqual(self.nudge(self.guard({"stop_hook_active": True})), "")
+
+    def test_silent_when_status_is_newer(self):
+        (self.project / "app.py").write_text("x")
+        past = time.time() - 1000
+        os.utime(self.project / "app.py", (past, past))
+        self.write("STATUS.md", GOOD_STATUS)
+        self.assertEqual(self.nudge(self.guard()), "")
+
+    def test_ignores_doc_edits(self):
+        self.old_status()
+        self.write("ROADMAP.md", GOOD_ROADMAP)
+        self.assertEqual(self.nudge(self.guard()), "")
+
+    def test_nudges_for_new_commit(self):
+        self.old_status()
+        git(self.project, "add", "docs")
+        git(self.project, "commit", "-qm", "docs", "--date=2026-01-01T00:00:00")
+        subprocess.run(["git", "-C", str(self.project), "commit", "--amend", "--no-edit", "-q"], check=True,
+                       env={**os.environ, "GIT_COMMITTER_DATE": "2026-01-01T00:00:00", "GIT_AUTHOR_NAME": "t",
+                            "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+        os.utime(self.docs / "STATUS.md", (time.time() - 1000,) * 2)
+        (self.project / "app.py").write_text("x")
+        git(self.project, "add", "app.py")
+        git(self.project, "commit", "-qm", "code")
+        self.assertIn("commit ", self.nudge(self.guard()))
+
+    def test_silent_when_status_ships_with_the_code(self):
+        self.old_status()
+        (self.project / "app.py").write_text("x")
+        git(self.project, "add", "-A")
+        git(self.project, "commit", "-qm", "code and docs")
+        os.utime(self.project / "app.py", (time.time() - 2000,) * 2)
+        self.assertEqual(self.nudge(self.guard()), "")
+
+    def test_cooldown_then_new_change(self):
+        self.old_status()
+        (self.project / "app.py").write_text("x")
+        self.assertTrue(self.nudge(self.guard()))
+        later = time.time() + 5
+        (self.project / "more.py").write_text("y")
+        os.utime(self.project / "more.py", (later, later))
+        self.assertEqual(self.nudge(self.guard()), "", "inside the cooldown")
+        self.assertIn("more.py", self.nudge(self.guard(COCKPIT_GUARD_MINUTES="0")))
+        self.assertTrue(self.nudge(self.guard({"session_id": "s2"})), "a new session has its own budget")
+
+    def test_off_switch_and_bad_input(self):
+        self.old_status()
+        (self.project / "app.py").write_text("x")
+        self.assertEqual(self.nudge(self.guard(COCKPIT_GUARD="off")), "")
+        self.assertEqual(self.nudge(self.guard(raw="not json")), "", "unreadable input: stay quiet")
+        self.data.mkdir(exist_ok=True)
+        (self.data / "project-cockpit-guard.json").write_text("[corrupt")
+        self.assertIn("app.py", self.nudge(self.guard(raw="{}")), "a corrupt state file is rebuilt")
+        self.assertEqual(self.nudge(self.guard(raw="{}")), "")
+
+
+class PreCompact(Base):
+    def run_hook(self) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(SCRIPT), "precompact"], input='{"trigger": "auto"}',
+                              capture_output=True, text=True, cwd=self.project, env=os.environ.copy())
+
+    def test_silent_without_status(self):
+        self.assertEqual((self.run_hook().returncode, self.run_hook().stdout), (0, ""))
+
+    def test_instructs_the_summary(self):
+        self.write("STATUS.md", GOOD_STATUS)
+        res = self.run_hook()
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("does not already record", res.stdout)
+        self.assertLess(len(res.stdout), 10000)
+
 
 class Package(unittest.TestCase):
     def test_skill_frontmatter(self):
@@ -392,11 +524,14 @@ class Package(unittest.TestCase):
         self.assertTrue((ROOT / entry["source"] / ".claude-plugin" / "plugin.json").exists())
         self.assertEqual(entry["name"], json.loads((SKILL / ".claude-plugin" / "plugin.json").read_text())["name"])
 
-    def test_hook_calls_brief(self):
-        hooks = json.loads((SKILL / "hooks" / "hooks.json").read_text())
-        cmd = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        self.assertIn("${CLAUDE_PLUGIN_ROOT}/scripts/cockpit.py", cmd)
-        self.assertTrue(cmd.endswith(" brief"))
+    def test_hooks_call_the_script(self):
+        hooks = json.loads((SKILL / "hooks" / "hooks.json").read_text())["hooks"]
+        for event, sub in (("SessionStart", "brief"), ("PreCompact", "precompact"), ("Stop", "guard")):
+            with self.subTest(event=event):
+                cmd = hooks[event][0]["hooks"][0]["command"]
+                self.assertIn("${CLAUDE_PLUGIN_ROOT}/scripts/cockpit.py", cmd)
+                self.assertTrue(cmd.endswith(f" {sub}"))
+        self.assertEqual(hooks["SessionStart"][0]["matcher"], "startup|resume|clear|compact")
 
     def test_relative_links_and_referenced_files_exist(self):
         for md in ROOT.rglob("*.md"):

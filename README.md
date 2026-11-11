@@ -15,15 +15,18 @@ docs/
 ## Why it works
 
 - **A brief, not a transcript.** A SessionStart hook puts `STATUS.md` back in context at startup, on `--resume`, after `/clear`, and right after compaction. That is exactly when the agent has lost its memory.
+- **Updates don't depend on memory.** The skill says to write state the moment it changes. Two hooks catch what slips through:
+  - **Stop:** when a turn ends with code newer than `STATUS.md`, the agent gets one short note to update it, or to say nothing changed. It nudges once per change, at most every 20 minutes, and never loops.
+  - **PreCompact:** before auto-compaction, it tells the summary to keep every decision, fix, and blocker not yet in `STATUS.md`, and to make updating it the first action afterward.
 - **Caps force curation.** Every doc has a hard line limit. When one fills up, finished work moves to the archive and stable facts move to the reference. Nobody gets to just write smaller.
 - **The repo outranks the docs.** The brief counts the commits since `STATUS.md` was last committed and flags uncommitted work. The agent checks `git` before it repeats a stale claim.
 - **History cannot be rewritten.** Closeouts are append-only, and decisions are superseded, never edited. `check --history` replays git to prove the archive only ever grew.
 - **No evidence, no claim.** Anything marked done or fixed cites a commit, a test run, or `file:line`. Disproven hypotheses go in a Ruled Out list, so nobody burns an afternoon re-investigating them.
-- **Cheap to carry.** About 90 tokens always loaded and about 1.7k when the skill fires, per `claude plugin details`. The hook ran in about 90 ms in testing.
+- **Cheap to carry.** About 90 tokens always loaded and about 1.7k when the skill fires, per `claude plugin details`. Each hook ran in about 90 to 120 ms in testing. The Stop hook adds a turn only when docs are actually behind.
 
 ## Install
 
-**Claude Code plugin** (the skill and the hook in one step):
+**Claude Code plugin** (the skill and all three hooks in one step):
 
 ```
 /plugin marketplace add Tranman324/project-cockpit
@@ -50,8 +53,10 @@ python3 project-cockpit/scripts/cockpit.py init --name "Acme API" --tier full   
 python3 project-cockpit/scripts/cockpit.py check                                  # exit 1 on any FAIL
 python3 project-cockpit/scripts/cockpit.py check --json --history origin/main     # CI mode
 python3 project-cockpit/scripts/cockpit.py closeout auth-rewrite                  # archive/YYYY-MM-auth-rewrite.md
-python3 project-cockpit/scripts/cockpit.py brief                                  # what the hook prints
+python3 project-cockpit/scripts/cockpit.py brief                                  # what the SessionStart hook prints
 ```
+
+The Stop hook (`guard`) works only in git repos and ignores edits inside `docs/`. Tune it with `COCKPIT_GUARD_MINUTES` (default 20), or turn it off with `COCKPIT_GUARD=off`.
 
 `check` enforces the line caps, the required STATUS sections, a real and recent `Updated:` date, at most seven TODOs, a non-empty Resume With, one Current milestone, closeout naming and evidence, and archive immutability. It also catches invisible or bidirectional Unicode, which can hide instructions from a human reviewer. Every check has a test that proves it fires.
 

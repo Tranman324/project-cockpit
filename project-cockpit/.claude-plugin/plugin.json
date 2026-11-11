@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "project-cockpit",
   "displayName": "Project Cockpit",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A capped STATUS/ROADMAP/REFERENCE doc set that lets any fresh Claude Code session resume a long-running project from one short file.",
   "author": {
     "name": "Jeremy Tran",
